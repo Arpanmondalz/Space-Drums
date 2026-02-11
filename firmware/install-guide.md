@@ -58,6 +58,8 @@ The board is now in firmware upload mode.
 
 ---
 
+**NOTE:** You will need to connect to the "AirDrums-Stick" wifi network and add your wifi SSID and password for each stick when you boot them up the first time
+
 ## Troubleshooting
 
 *   **Port not visible:** Ensure you are using a data cable and not a charge-only cable. Try a different USB port or reinstall the CP210x or CH340 drivers if required.
