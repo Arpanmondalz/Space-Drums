@@ -24,6 +24,8 @@ To ensure the ESP32-S3 functions correctly, you must select the specific board a
 *   **Flash Size:** 8MB (Or match your specific module's capacity)
 *   **Core Debug Level:** None
 
+**NOTE:** You will need to update STICK_ID to "Right" or "Left" based on which stick you are uploading the code to. 
+
 ---
 
 ## Phase 2: Connecting the Hardware
