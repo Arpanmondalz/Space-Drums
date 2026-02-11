@@ -85,6 +85,7 @@ All audio files can be downloaded from the sounds/ folder
 
 3.  **Power on the Sticks:**
     *   Turn on the ESP32 drumsticks.
+    *   Only the first time: You will need to connect to the "AirDrums-Stick" wifi network and add your wifi SSID and password for each stick
     *   They will automatically discover the server over UDP.
     *   A confirmation sound will play once both sticks are synchronized.
 
