@@ -262,13 +262,13 @@ def udp_loops():
                     if s_conn: s_conn.play()
                     fully_connected = True
         
-        # Optional: Reset if a stick goes offline for > 10 seconds (so it can ding again later)
+        # Optional: Reset if a stick goes offline for > 20 seconds (so it can ding again later)
         if fully_connected:
-            if (now - last_hit_time["LEFT"] > 10.0) or (now - last_hit_time["RIGHT"] > 10.0):
+            if (now - last_hit_time["LEFT"] > 20.0) or (now - last_hit_time["RIGHT"] > 20.0):
                 fully_connected = False
                 # Reset individual flags based on timeout
-                if now - last_hit_time["LEFT"] > 10.0: connected_sticks["LEFT"] = False
-                if now - last_hit_time["RIGHT"] > 10.0: connected_sticks["RIGHT"] = False
+                if now - last_hit_time["LEFT"] > 20.0: connected_sticks["LEFT"] = False
+                if now - last_hit_time["RIGHT"] > 20.0: connected_sticks["RIGHT"] = False
                 print(" [SYSTEM] Connection Lost. Waiting for sticks...")
 
         time.sleep(0.001)
