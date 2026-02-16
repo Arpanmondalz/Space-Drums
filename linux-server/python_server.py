@@ -8,7 +8,7 @@ import mediapipe as mp
 import numpy as np
 import logging
 import sys
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, send_file
 from flask_socketio import SocketIO
 
 # ================= LINUX PRIORITY =================
@@ -161,7 +161,12 @@ HTML_PAGE = """
 <html lang="en">
 <head>
     <meta charset="UTF-8"><title>AirDrums Linux</title>
+    
     <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="/icon.png">
+    <link rel="apple-touch-icon" href="/icon.png">
+    <meta name="theme-color" content="#000000">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { margin:0; background:#000; display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; overflow:hidden; font-family:sans-serif; color:white; }
@@ -196,10 +201,34 @@ HTML_PAGE = """
 </body>
 </html>
 """
+
 @app.route('/') 
 def index(): return render_template_string(HTML_PAGE)
+
+# --- ICON ROUTE ---
+@app.route('/icon.png')
+def icon():
+    if os.path.exists('icon.png'): return send_file('icon.png', mimetype='image/png')
+    return "No Icon Found", 404
+
+# --- MANIFEST ROUTE (WITH LANDSCAPE FORCE) ---
 @app.route('/manifest.json') 
-def m(): return jsonify({"name":"AirDrums","display":"standalone","start_url":"/","icons":[]})
+def m(): 
+    return jsonify({
+        "name": "AirDrums",
+        "short_name": "AirDrums",
+        "display": "standalone",
+        "orientation": "landscape", # <--- Forces Landscape on Mobile
+        "start_url": "/",
+        "background_color": "#000000",
+        "theme_color": "#000000",
+        "icons": [{
+            "src": "/icon.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        }]
+    })
+
 @socketio.on('frame')
 def h(data):
     global latest_frame_from_phone
@@ -210,67 +239,27 @@ def h(data):
 
 def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
 
-# ================= MAIN LOOP =================
+# ================= MAIN LOOP (CLEAN) =================
 def udp_loops():
-    # Load the connection sound
-    s_conn = load_sound("sounds/connected.wav")
-    
-    # State tracking
-    connected_sticks = {"LEFT": False, "RIGHT": False}
-    fully_connected = False
-    last_hit_time = {"LEFT": 0, "RIGHT": 0}
-
     t_d = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_d.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     t_l = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_l.bind(("0.0.0.0", UDP_HIT_PORT)); t_l.setblocking(False)
     
     lb = 0
     while True:
-        now = time.time()
-
         # 1. Discovery Broadcast (Every 1s)
-        if now - lb > 1.0:
+        if time.time() - lb > 1.0:
             try: t_d.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
             except: pass
-            lb = now
+            lb = time.time()
 
-        # 2. Receive Data
+        # 2. Receive Data & Play Immediately
         while True:
             try:
                 data, _ = t_l.recvfrom(32); msg = data.decode("utf-8").upper().strip()
-                
-                # Determine which stick sent the message
-                stick_id = "LEFT" if "LEFT" in msg else "RIGHT"
-                
-                # Update connection state
-                last_hit_time[stick_id] = now
-                if not connected_sticks[stick_id]:
-                    connected_sticks[stick_id] = True
-                    print(f" [SYSTEM] {stick_id} Stick Connected!")
-
-                # Play the drum sound
-                if stick_id == "LEFT": play_sound(current_zone_left)
+                if "LEFT" in msg: play_sound(current_zone_left)
                 else: play_sound(current_zone_right)
-
             except: break
         
-        # 3. Check for Full Connection (Both sticks active within last 5 seconds)
-        if not fully_connected:
-            if connected_sticks["LEFT"] and connected_sticks["RIGHT"]:
-                # Double check they are actually recent
-                if (now - last_hit_time["LEFT"] < 5.0) and (now - last_hit_time["RIGHT"] < 5.0):
-                    print(" [SYSTEM] ALL SYSTEMS GO!")
-                    if s_conn: s_conn.play()
-                    fully_connected = True
-        
-        # Optional: Reset if a stick goes offline for > 20 seconds (so it can ding again later)
-        if fully_connected:
-            if (now - last_hit_time["LEFT"] > 20.0) or (now - last_hit_time["RIGHT"] > 20.0):
-                fully_connected = False
-                # Reset individual flags based on timeout
-                if now - last_hit_time["LEFT"] > 20.0: connected_sticks["LEFT"] = False
-                if now - last_hit_time["RIGHT"] > 20.0: connected_sticks["RIGHT"] = False
-                print(" [SYSTEM] Connection Lost. Waiting for sticks...")
-
         time.sleep(0.001)
 
 if __name__ == "__main__":
