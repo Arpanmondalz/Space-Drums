@@ -40,13 +40,15 @@ pygame.mixer.set_num_channels(16)
 
 def load_sound(path):
     if os.path.exists(path): return pygame.mixer.Sound(path)
+    print(f" [WARNING] Sound missing: {path}")
     return None
 
 sounds = {
     "SNARE": load_sound("sounds/snare.wav"),
     "HI-HAT": load_sound("sounds/hihat.wav"),
     "FLOOR TOM": load_sound("sounds/tom.wav"),
-    "CRASH": load_sound("sounds/crash.wav")
+    "CRASH": load_sound("sounds/crash.wav"),
+    "KICK": load_sound("sounds/kick.wav")  # <--- NEW KICK SOUND
 }
 
 def play_sound(zone):
@@ -151,7 +153,7 @@ def process_pose_frame(frame, mirror_mode=False):
 
     return frame
 
-# ================= PWA SERVER (UPDATED FOR BINARY) =================
+# ================= PWA SERVER =================
 app = Flask(__name__)
 # IMPORTANT: ping_interval set lower to keep connection snappy
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', ping_interval=5)
@@ -174,7 +176,7 @@ HTML_PAGE = """
             background-color: #000; 
             display: flex; 
             flex-direction: column;
-            justify-content: center; /* FIXED: was justify_content */
+            justify-content: center; 
             align-items: center; 
             height: 100vh; 
             width: 100vw; 
@@ -337,7 +339,7 @@ def h(data):
 
 def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
 
-# ================= UDP NETWORK =================
+# ================= UDP NETWORK (UPDATED FOR KICK) =================
 def udp_loops():
     t_disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     t_disc.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -348,17 +350,27 @@ def udp_loops():
     last_broadcast = 0
     while True:
         current_time = time.time()
+        # 1. Discovery Broadcast
         if current_time - last_broadcast > 1.0:
             try: t_disc.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
             except: pass
             last_broadcast = current_time
+        
+        # 2. Receive Hits
         while True:
             try:
                 data, _ = t_list.recvfrom(32)
                 msg = data.decode("utf-8").upper().strip()
-                if "LEFT" in msg: play_sound(current_zone_left)
-                elif "RIGHT" in msg: play_sound(current_zone_right)
-                else: play_sound(current_zone_right)
+                
+                # --- NEW KICK LOGIC ---
+                if "KICK" in msg:
+                    play_sound("KICK")
+                elif "LEFT" in msg: 
+                    play_sound(current_zone_left)
+                elif "RIGHT" in msg: 
+                    play_sound(current_zone_right)
+                # ----------------------
+                    
             except BlockingIOError: break 
             except Exception as e: break
         time.sleep(0.001)
@@ -370,14 +382,13 @@ if __name__ == "__main__":
     except: ip="127.0.0.1"
 
     print("="*30)
-    print(" AIR DRUMS: BINARY MODE")
+    print(" AIR DRUMS: BINARY MODE + KICK")
     print("="*30)
     
     threading.Thread(target=udp_loops, daemon=True).start()
 
     mode = input(" Mode (1=Laptop, 2=Phone): ").strip()
 
-    # ... existing code ...
     if mode == "2":
         print(f" Go to: http://{ip}:{WEB_PORT}")
         threading.Thread(target=run_web, daemon=True).start()
@@ -387,22 +398,15 @@ if __name__ == "__main__":
 
         while True:
             with frame_lock:
-                # CHECK IF FRAME EXISTS
                 if latest_frame_from_phone is not None:
                     
                     # 1. UNIQUE ID CHECK (The Magic Fix)
-                    # We check the memory address (id) of the array. 
-                    # Since cv2.imdecode creates a new array every time, 
-                    # a new ID means a new frame.
                     current_id = id(latest_frame_from_phone)
                     
                     if current_id != last_processed_id:
-                        # Flip for visual comfort on server
                         frame = cv2.flip(latest_frame_from_phone, 1)
                         processed_frame = process_pose_frame(frame, mirror_mode=True)
                         cv2.imshow('Phone Feed', processed_frame)
-                        
-                        # Update the tracker
                         last_processed_id = current_id
                     
             if cv2.waitKey(1) & 0xFF == ord('q'): break
