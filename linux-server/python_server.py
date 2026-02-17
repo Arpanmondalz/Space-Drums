@@ -45,13 +45,15 @@ pygame.mixer.set_num_channels(16)
 
 def load_sound(path):
     if os.path.exists(path): return pygame.mixer.Sound(path)
+    print(f" [WARNING] Sound not found: {path}")
     return None
 
 sounds = {
     "SNARE": load_sound("sounds/snare.wav"),
     "HI-HAT": load_sound("sounds/hihat.wav"),
     "FLOOR TOM": load_sound("sounds/tom.wav"),
-    "CRASH": load_sound("sounds/crash.wav")
+    "CRASH": load_sound("sounds/crash.wav"),
+    "KICK": load_sound("sounds/kick.wav")  # <--- NEW KICK SOUND
 }
 
 def play_sound(zone):
@@ -218,7 +220,7 @@ def m():
         "name": "AirDrums",
         "short_name": "AirDrums",
         "display": "standalone",
-        "orientation": "landscape", # <--- Forces Landscape on Mobile
+        "orientation": "landscape", 
         "start_url": "/",
         "background_color": "#000000",
         "theme_color": "#000000",
@@ -239,7 +241,7 @@ def h(data):
 
 def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
 
-# ================= MAIN LOOP (CLEAN) =================
+# ================= MAIN LOOP (UPDATED FOR KICK) =================
 def udp_loops():
     t_d = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_d.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     t_l = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_l.bind(("0.0.0.0", UDP_HIT_PORT)); t_l.setblocking(False)
@@ -256,8 +258,16 @@ def udp_loops():
         while True:
             try:
                 data, _ = t_l.recvfrom(32); msg = data.decode("utf-8").upper().strip()
-                if "LEFT" in msg: play_sound(current_zone_left)
-                else: play_sound(current_zone_right)
+                
+                # --- UPDATED LOGIC ---
+                if "KICK" in msg:
+                    play_sound("KICK")
+                elif "LEFT" in msg: 
+                    play_sound(current_zone_left)
+                elif "RIGHT" in msg: 
+                    play_sound(current_zone_right)
+                # ---------------------
+                    
             except: break
         
         time.sleep(0.001)
