@@ -18,8 +18,8 @@ BROADCAST_INTERVAL = 1.0
 
 # Drum Zone Layout (0.0 - 1.0)
 CYMBAL_HEIGHT = 0.35
-DIVIDER_1 = 0.30  
-DIVIDER_2 = 0.70  
+DIVIDER_1 = 0.35  # Left vs Center for Bottom (35%)
+DIVIDER_2 = 0.65  # Center vs Right for Top & Bottom (65%)
 
 # Stick Physics
 STICK_EXTENSION = 1.2 
@@ -48,7 +48,8 @@ sounds = {
     "HI-HAT": load_sound("sounds/hihat.wav"),
     "FLOOR TOM": load_sound("sounds/tom.wav"),
     "CRASH": load_sound("sounds/crash.wav"),
-    "KICK": load_sound("sounds/kick.wav")  # <--- NEW KICK SOUND
+    "RIDE": load_sound("sounds/ride.wav"), # <--- NEW RIDE SOUND
+    "KICK": load_sound("sounds/kick.wav")  
 }
 
 def play_sound(zone):
@@ -93,10 +94,15 @@ pose = mp_pose.Pose(
 )
 
 def get_drum_zone(x, y):
-    if x < DIVIDER_1: return "HI-HAT"
-    if y < CYMBAL_HEIGHT: return "CRASH"
-    if x < DIVIDER_2: return "SNARE"
-    return "FLOOR TOM"
+    if y < CYMBAL_HEIGHT:
+        # Top Row: Left & Center = CRASH, Right = RIDE
+        if x < DIVIDER_2: return "CRASH"
+        return "RIDE"
+    else:
+        # Bottom Row: Left = HI-HAT, Center = SNARE, Right = FLOOR TOM
+        if x < DIVIDER_1: return "HI-HAT"
+        if x < DIVIDER_2: return "SNARE"
+        return "FLOOR TOM"
 
 def extend_line(x1, y1, x2, y2, scale=1.0):
     return int(x2 + (x2-x1)*scale), int(y2 + (y2-y1)*scale)
@@ -108,10 +114,21 @@ def process_pose_frame(frame, mirror_mode=False):
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = pose.process(rgb_frame)
 
-    # Draw Zones
-    cv2.line(frame, (int(w*DIVIDER_1), 0), (int(w*DIVIDER_1), h), (100,100,100), 1)
-    cv2.line(frame, (int(w*DIVIDER_1), int(h*CYMBAL_HEIGHT)), (w, int(h*CYMBAL_HEIGHT)), (100,100,100), 1)
-    cv2.line(frame, (int(w*DIVIDER_2), int(h*CYMBAL_HEIGHT)), (int(w*DIVIDER_2), h), (100,100,100), 1)
+    # Draw Zones (Updated Layout)
+    c = (100, 100, 100)
+    cymbal_y = int(h * CYMBAL_HEIGHT)
+    div_1_x = int(w * DIVIDER_1)
+    div_2_x = int(w * DIVIDER_2)
+
+    # Horizontal divider for top/bottom
+    cv2.line(frame, (0, cymbal_y), (w, cymbal_y), c, 1)
+    
+    # Top vertical divider (Crash vs Ride)
+    cv2.line(frame, (div_2_x, 0), (div_2_x, cymbal_y), c, 1)
+    
+    # Bottom vertical dividers (Hi-Hat vs Snare vs Floor Tom)
+    cv2.line(frame, (div_1_x, cymbal_y), (div_1_x, h), c, 1)
+    cv2.line(frame, (div_2_x, cymbal_y), (div_2_x, h), c, 1)
 
     if results.pose_landmarks:
         lm = results.pose_landmarks.landmark
@@ -362,14 +379,12 @@ def udp_loops():
                 data, _ = t_list.recvfrom(32)
                 msg = data.decode("utf-8").upper().strip()
                 
-                # --- NEW KICK LOGIC ---
                 if "KICK" in msg:
                     play_sound("KICK")
                 elif "LEFT" in msg: 
                     play_sound(current_zone_left)
                 elif "RIGHT" in msg: 
                     play_sound(current_zone_right)
-                # ----------------------
                     
             except BlockingIOError: break 
             except Exception as e: break
