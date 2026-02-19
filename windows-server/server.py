@@ -17,7 +17,7 @@ WEB_PORT = 5000
 BROADCAST_INTERVAL = 1.0
 
 # Drum Zone Layout (0.0 - 1.0)
-CYMBAL_HEIGHT = 0.35
+CYMBAL_HEIGHT = 0.4
 DIVIDER_1 = 0.35  # Left vs Center for Bottom (35%)
 DIVIDER_2 = 0.65  # Center vs Right for Top & Bottom (65%)
 
@@ -437,3 +437,4 @@ if __name__ == "__main__":
             if cv2.waitKey(1) & 0xFF == ord('q'): break
         vs.stop()
         cv2.destroyAllWindows()
+
