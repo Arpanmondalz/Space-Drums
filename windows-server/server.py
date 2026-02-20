@@ -24,13 +24,18 @@ DIVIDER_2 = 0.65  # Center vs Right for Top & Bottom (65%)
 # Stick Physics
 STICK_EXTENSION = 1.2 
 
-# Prediction Settings 
-PREDICTION_STRENGTH = 5.0 
+# --- NEW: PERFORMANCE & TRACKING ---
+HEADLESS_MODE = False  # Set to True to disable video rendering for max FPS
+
+# Lightweight Kalman Filter (Alpha-Beta)
+KALMAN_ALPHA = 0.6     # Trust in raw position
+KALMAN_BETA = 0.2      # Trust in velocity momentum
+PREDICTION_FRAMES = 4  # How many frames to project into the future
 
 # Global State
 current_zone_left = "SNARE"
 current_zone_right = "SNARE"
-previous_wrist_x = {"Left": 0, "Right": 0} 
+kalman_state = {"Left": None, "Right": None} # Stores [x, y, vx, vy]
 latest_frame_from_phone = None
 frame_lock = threading.Lock()
 
@@ -108,27 +113,23 @@ def extend_line(x1, y1, x2, y2, scale=1.0):
     return int(x2 + (x2-x1)*scale), int(y2 + (y2-y1)*scale)
 
 def process_pose_frame(frame, mirror_mode=False):
-    global current_zone_left, current_zone_right, previous_wrist_x
+    global current_zone_left, current_zone_right, kalman_state
     
     h, w, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = pose.process(rgb_frame)
 
-    # Draw Zones (Updated Layout)
-    c = (100, 100, 100)
-    cymbal_y = int(h * CYMBAL_HEIGHT)
-    div_1_x = int(w * DIVIDER_1)
-    div_2_x = int(w * DIVIDER_2)
+    if not HEADLESS_MODE:
+        # Draw Zones (Updated Layout)
+        c = (100, 100, 100)
+        cymbal_y = int(h * CYMBAL_HEIGHT)
+        div_1_x = int(w * DIVIDER_1)
+        div_2_x = int(w * DIVIDER_2)
 
-    # Horizontal divider for top/bottom
-    cv2.line(frame, (0, cymbal_y), (w, cymbal_y), c, 1)
-    
-    # Top vertical divider (Crash vs Ride)
-    cv2.line(frame, (div_2_x, 0), (div_2_x, cymbal_y), c, 1)
-    
-    # Bottom vertical dividers (Hi-Hat vs Snare vs Floor Tom)
-    cv2.line(frame, (div_1_x, cymbal_y), (div_1_x, h), c, 1)
-    cv2.line(frame, (div_2_x, cymbal_y), (div_2_x, h), c, 1)
+        cv2.line(frame, (0, cymbal_y), (w, cymbal_y), c, 1)
+        cv2.line(frame, (div_2_x, 0), (div_2_x, cymbal_y), c, 1)
+        cv2.line(frame, (div_1_x, cymbal_y), (div_1_x, h), c, 1)
+        cv2.line(frame, (div_2_x, cymbal_y), (div_2_x, h), c, 1)
 
     if results.pose_landmarks:
         lm = results.pose_landmarks.landmark
@@ -144,15 +145,32 @@ def process_pose_frame(frame, mirror_mode=False):
                 wx, wy = int(wrist.x * w), int(wrist.y * h)
                 
                 # 1. Base Tip
-                tx, ty = extend_line(ex, ey, wx, wy, STICK_EXTENSION)
+                raw_tx, raw_ty = extend_line(ex, ey, wx, wy, STICK_EXTENSION)
                 
-                # 2. Predictive Warp
-                current_x = wrist.x
-                dx = current_x - previous_wrist_x[name]
-                pred_offset = int(dx * w * PREDICTION_STRENGTH)
-                tx += pred_offset
+                # 2. Alpha-Beta Kalman Filter
+                if kalman_state[name] is None:
+                    kalman_state[name] = [raw_tx, raw_ty, 0.0, 0.0]
+                    kx, ky = raw_tx, raw_ty
+                    kvx, kvy = 0.0, 0.0
+                else:
+                    kx, ky, kvx, kvy = kalman_state[name]
+                    
+                    pred_x = kx + kvx
+                    pred_y = ky + kvy
+                    
+                    res_x = raw_tx - pred_x
+                    res_y = raw_ty - pred_y
+                    
+                    kx = pred_x + (KALMAN_ALPHA * res_x)
+                    ky = pred_y + (KALMAN_ALPHA * res_y)
+                    kvx = kvx + (KALMAN_BETA * res_x)
+                    kvy = kvy + (KALMAN_BETA * res_y)
+                    
+                    kalman_state[name] = [kx, ky, kvx, kvy]
 
-                previous_wrist_x[name] = current_x
+                # 3. Time Travel Prediction
+                tx = int(kx + (kvx * PREDICTION_FRAMES))
+                ty = int(ky + (kvy * PREDICTION_FRAMES))
 
                 tx = max(0, min(w, tx))
                 ty = max(0, min(h, ty))
@@ -163,10 +181,12 @@ def process_pose_frame(frame, mirror_mode=False):
                 else: current_zone_right = detected_zone
 
                 # Visuals
-                color = (0, 255, 0)
-                cv2.line(frame, (wx, wy), (tx, ty), color, 2) 
-                cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1) 
-                cv2.putText(frame, detected_zone[:3], (tx, ty-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                if not HEADLESS_MODE:
+                    color = (0, 255, 0)
+                    cv2.line(frame, (wx, wy), (tx, ty), color, 2) 
+                    cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1) 
+                    cv2.putText(frame, detected_zone[:3], (tx, ty-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    cv2.circle(frame, (int(kx), int(ky)), 2, (255, 255, 255), -1)
 
     return frame
 
@@ -403,38 +423,47 @@ if __name__ == "__main__":
     threading.Thread(target=udp_loops, daemon=True).start()
 
     mode = input(" Mode (1=Laptop, 2=Phone): ").strip()
+    print(f" [INFO] Headless Mode is {'ON (Max FPS)' if HEADLESS_MODE else 'OFF'}")
 
     if mode == "2":
         print(f" Go to: http://{ip}:{WEB_PORT}")
         threading.Thread(target=run_web, daemon=True).start()
         
-        # TRACKER FOR THE LAST PROCESSED FRAME
         last_processed_id = None 
 
         while True:
             with frame_lock:
                 if latest_frame_from_phone is not None:
-                    
-                    # 1. UNIQUE ID CHECK (The Magic Fix)
                     current_id = id(latest_frame_from_phone)
                     
                     if current_id != last_processed_id:
                         frame = cv2.flip(latest_frame_from_phone, 1)
                         processed_frame = process_pose_frame(frame, mirror_mode=True)
-                        cv2.imshow('Phone Feed', processed_frame)
+                        if not HEADLESS_MODE:
+                            cv2.imshow('Phone Feed', processed_frame)
                         last_processed_id = current_id
-                    
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            
+            if not HEADLESS_MODE:
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+            else:
+                time.sleep(0.001)
     else:
         vs = WebcamStream(src=0).start()
         print(" [CAM] Threaded Capture Started")
         while not vs.stopped:
             frame = vs.read()
             if frame is None: continue
+            
             frame = cv2.flip(frame, 1)
             frame = process_pose_frame(frame, mirror_mode=True)
-            cv2.imshow('Laptop Feed', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            
+            if not HEADLESS_MODE:
+                cv2.imshow('Laptop Feed', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+            else:
+                time.sleep(0.001)
+                
         vs.stop()
-        cv2.destroyAllWindows()
+        if not HEADLESS_MODE: cv2.destroyAllWindows()
+
 
