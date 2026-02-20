@@ -11,6 +11,9 @@ import sys
 from flask import Flask, render_template_string, jsonify, send_file
 from flask_socketio import SocketIO
 
+# --- PERFORMANCE & TRACKING ---
+HEADLESS_MODE = True  # Set to True to disable all video rendering for maximum FPS!
+
 # ================= LINUX PRIORITY =================
 try:
     os.nice(-10) 
@@ -24,16 +27,20 @@ UDP_HIT_PORT = 5556
 WEB_PORT = 5000
 
 # Drum Zones
-CYMBAL_HEIGHT = 0.35
-DIVIDER_1 = 0.30  
-DIVIDER_2 = 0.70  
+CYMBAL_HEIGHT = 0.4
+DIVIDER_1 = 0.35  
+DIVIDER_2 = 0.65  
 STICK_EXTENSION = 1.2 
-PREDICTION_STRENGTH = 5.0 
+
+# Lightweight Kalman Filter (Alpha-Beta)
+KALMAN_ALPHA = 0.6     # Trust in raw position (0.0 = frozen, 1.0 = raw/jittery)
+KALMAN_BETA = 0.2      # Trust in velocity momentum (0.0 = no prediction, 1.0 = overshoot)
+PREDICTION_FRAMES = 4  # How many frames to project into the future
 
 # Global State
 current_zone_left = "SNARE"
 current_zone_right = "SNARE"
-previous_wrist_x = {"Left": 0, "Right": 0} 
+kalman_state = {"Left": None, "Right": None} # Stores [x, y, vx, vy]
 latest_frame_from_phone = None
 frame_lock = threading.Lock()
 
@@ -53,7 +60,8 @@ sounds = {
     "HI-HAT": load_sound("sounds/hihat.wav"),
     "FLOOR TOM": load_sound("sounds/tom.wav"),
     "CRASH": load_sound("sounds/crash.wav"),
-    "KICK": load_sound("sounds/kick.wav")  # <--- NEW KICK SOUND
+    "RIDE": load_sound("sounds/ride.wav"), # <--- NEW RIDE SOUND
+    "KICK": load_sound("sounds/kick.wav")  
 }
 
 def play_sound(zone):
@@ -98,25 +106,36 @@ pose = mp_pose.Pose(
 )
 
 def get_drum_zone(x, y):
-    if x < DIVIDER_1: return "HI-HAT"
-    if y < CYMBAL_HEIGHT: return "CRASH"
-    if x < DIVIDER_2: return "SNARE"
-    return "FLOOR TOM"
+    if y < CYMBAL_HEIGHT:
+        # Top Row: Left & Center = CRASH, Right = RIDE
+        if x < DIVIDER_2: return "CRASH"
+        return "RIDE"
+    else:
+        # Bottom Row: Left = HI-HAT, Center = SNARE, Right = FLOOR TOM
+        if x < DIVIDER_1: return "HI-HAT"
+        if x < DIVIDER_2: return "SNARE"
+        return "FLOOR TOM"
 
 def extend_line(x1, y1, x2, y2, scale=1.0):
     return int(x2 + (x2-x1)*scale), int(y2 + (y2-y1)*scale)
 
 def process_pose_frame(frame, mirror_mode=False):
-    global current_zone_left, current_zone_right, previous_wrist_x
+    global current_zone_left, current_zone_right, kalman_state 
     h, w, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = pose.process(rgb_frame)
 
-    # Zones
-    c = (80,80,80)
-    cv2.line(frame, (int(w*DIVIDER_1), 0), (int(w*DIVIDER_1), h), c, 1)
-    cv2.line(frame, (int(w*DIVIDER_1), int(h*CYMBAL_HEIGHT)), (w, int(h*CYMBAL_HEIGHT)), c, 1)
-    cv2.line(frame, (int(w*DIVIDER_2), int(h*CYMBAL_HEIGHT)), (int(w*DIVIDER_2), h), c, 1)
+    if not HEADLESS_MODE:
+        # Draw Zones only if we are rendering the video
+        c = (80,80,80)
+        cymbal_y = int(h * CYMBAL_HEIGHT)
+        div_1_x = int(w * DIVIDER_1)
+        div_2_x = int(w * DIVIDER_2)
+
+        cv2.line(frame, (0, cymbal_y), (w, cymbal_y), c, 1)
+        cv2.line(frame, (div_2_x, 0), (div_2_x, cymbal_y), c, 1)
+        cv2.line(frame, (div_1_x, cymbal_y), (div_1_x, h), c, 1)
+        cv2.line(frame, (div_2_x, cymbal_y), (div_2_x, h), c, 1)
 
     if results.pose_landmarks:
         lm = results.pose_landmarks.landmark
@@ -129,16 +148,39 @@ def process_pose_frame(frame, mirror_mode=False):
                 ex, ey = int(elbow.x * w), int(elbow.y * h)
                 wx, wy = int(wrist.x * w), int(wrist.y * h)
                 
-                # Physics
-                tx, ty = extend_line(ex, ey, wx, wy, STICK_EXTENSION)
+                # 1. Base Physics
+                raw_tx, raw_ty = extend_line(ex, ey, wx, wy, STICK_EXTENSION)
                 
-                # Prediction
-                current_x = wrist.x
-                dx = current_x - previous_wrist_x[name]
-                pred_offset = int(dx * w * PREDICTION_STRENGTH)
-                tx += pred_offset
-                previous_wrist_x[name] = current_x
+                # 2. NEW: Alpha-Beta Kalman Filter
+                if kalman_state[name] is None:
+                    # First frame: Initialize state [x, y, velocity_x, velocity_y]
+                    kalman_state[name] = [raw_tx, raw_ty, 0.0, 0.0]
+                    kx, ky = raw_tx, raw_ty
+                    kvx, kvy = 0.0, 0.0
+                else:
+                    kx, ky, kvx, kvy = kalman_state[name]
+                    
+                    # Predict next state using momentum
+                    pred_x = kx + kvx
+                    pred_y = ky + kvy
+                    
+                    # Calculate residual (difference between raw camera measurement and prediction)
+                    res_x = raw_tx - pred_x
+                    res_y = raw_ty - pred_y
+                    
+                    # Update state with Alpha (position gain) and Beta (velocity gain)
+                    kx = pred_x + (KALMAN_ALPHA * res_x)
+                    ky = pred_y + (KALMAN_ALPHA * res_y)
+                    kvx = kvx + (KALMAN_BETA * res_x)
+                    kvy = kvy + (KALMAN_BETA * res_y)
+                    
+                    kalman_state[name] = [kx, ky, kvx, kvy]
 
+                # 3. Time Travel Prediction
+                tx = int(kx + (kvx * PREDICTION_FRAMES))
+                ty = int(ky + (kvy * PREDICTION_FRAMES))
+
+                # Keep coordinates safely on-screen
                 tx = max(0, min(w, tx))
                 ty = max(0, min(h, ty))
 
@@ -146,13 +188,15 @@ def process_pose_frame(frame, mirror_mode=False):
                 if name == "Left": current_zone_left = detected_zone
                 else: current_zone_right = detected_zone
 
-                # Draw
-                col = (0, 255, 0)
-                cv2.line(frame, (wx, wy), (tx, ty), col, 2) 
-                cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1) 
-                cv2.putText(frame, detected_zone[:3], (tx, ty-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
-    return frame
+                if not HEADLESS_MODE:
+                    col = (0, 255, 0)
+                    cv2.line(frame, (wx, wy), (tx, ty), col, 2) 
+                    cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1) 
+                    cv2.putText(frame, detected_zone[:3], (tx, ty-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+                    cv2.circle(frame, (int(kx), int(ky)), 2, (255, 255, 255), -1)
 
+    return frame
+    
 # ================= WEB SERVER =================
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_interval=5) # Uses eventlet!
@@ -241,7 +285,7 @@ def h(data):
 
 def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
 
-# ================= MAIN LOOP (UPDATED FOR KICK) =================
+# ================= MAIN LOOP =================
 def udp_loops():
     t_d = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_d.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     t_l = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_l.bind(("0.0.0.0", UDP_HIT_PORT)); t_l.setblocking(False)
@@ -259,14 +303,12 @@ def udp_loops():
             try:
                 data, _ = t_l.recvfrom(32); msg = data.decode("utf-8").upper().strip()
                 
-                # --- UPDATED LOGIC ---
                 if "KICK" in msg:
                     play_sound("KICK")
                 elif "LEFT" in msg: 
                     play_sound(current_zone_left)
                 elif "RIGHT" in msg: 
                     play_sound(current_zone_right)
-                # ---------------------
                     
             except: break
         
@@ -281,6 +323,8 @@ if __name__ == "__main__":
     threading.Thread(target=udp_loops, daemon=True).start()
 
     mode = input(" Mode (1=Laptop, 2=Phone): ").strip()
+    print(f" [INFO] Headless Mode is {'ON (Max FPS)' if HEADLESS_MODE else 'OFF'}")
+    
     if mode == "2":
         threading.Thread(target=run_web, daemon=True).start()
         lid = None
@@ -289,13 +333,25 @@ if __name__ == "__main__":
                 if latest_frame_from_phone is not None:
                     cid = id(latest_frame_from_phone)
                     if cid != lid:
-                        cv2.imshow('Phone', process_pose_frame(cv2.flip(latest_frame_from_phone,1), True))
+                        frame = process_pose_frame(cv2.flip(latest_frame_from_phone,1), True)
                         lid = cid
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+                        if not HEADLESS_MODE:
+                            cv2.imshow('Phone', frame)
+            
+            if not HEADLESS_MODE:
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+            else:
+                time.sleep(0.001) # Keeps the headless loop from pegging the CPU
     else:
         vs = WebcamStream(src=0).start()
         while not vs.stopped:
             f = vs.read()
-            if f is not None: cv2.imshow('Laptop', process_pose_frame(cv2.flip(f,1), True))
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
-        vs.stop(); cv2.destroyAllWindows()
+            if f is not None: 
+                frame = process_pose_frame(cv2.flip(f,1), True)
+                if not HEADLESS_MODE:
+                    cv2.imshow('Laptop', frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'): break
+                else:
+                    time.sleep(0.001)
+        vs.stop()
+        if not HEADLESS_MODE: cv2.destroyAllWindows()
