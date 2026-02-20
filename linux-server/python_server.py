@@ -32,6 +32,10 @@ DIVIDER_1 = 0.35
 DIVIDER_2 = 0.65  
 STICK_EXTENSION = 1.2 
 
+# --- DEBOUNCE SETTINGS ---
+DEBOUNCE_TIME = 0.04  # 40 milliseconds cooldown per stick
+last_hit_time = {"LEFT": 0.0, "RIGHT": 0.0, "KICK": 0.0}
+
 # Lightweight Kalman Filter (Alpha-Beta)
 KALMAN_ALPHA = 0.6     # Trust in raw position (0.0 = frozen, 1.0 = raw/jittery)
 KALMAN_BETA = 0.2      # Trust in velocity momentum (0.0 = no prediction, 1.0 = overshoot)
@@ -285,33 +289,58 @@ def h(data):
 
 def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
 
-# ================= MAIN LOOP =================
-def udp_loops():
-    t_d = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_d.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    t_l = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); t_l.bind(("0.0.0.0", UDP_HIT_PORT)); t_l.setblocking(False)
-    
-    lb = 0
-    while True:
-        # 1. Discovery Broadcast (Every 1s)
-        if time.time() - lb > 1.0:
-            try: t_d.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
-            except: pass
-            lb = time.time()
 
-        # 2. Receive Data & Play Immediately
+# ================= UDP NETWORK (UPDATED WITH DEBOUNCE) =================
+def udp_loops():
+    t_disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    t_disc.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    t_list = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    t_list.bind(("0.0.0.0", UDP_HIT_PORT))
+    t_list.setblocking(False) 
+    print(f" [NET] Listening on {UDP_HIT_PORT}")
+    
+    last_broadcast = 0
+    
+    while True:
+        current_time = time.time()
+        
+        # 1. Discovery Broadcast (CRITICAL: Hardware needs this to connect!)
+        if current_time - last_broadcast > 1.0:
+            try: 
+                t_disc.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
+            except: 
+                pass
+            last_broadcast = current_time
+        
+        # 2. Receive Hits & Debounce
         while True:
             try:
-                data, _ = t_l.recvfrom(32); msg = data.decode("utf-8").upper().strip()
+                data, _ = t_list.recvfrom(32)
+                msg = data.decode("utf-8").upper().strip()
+                now = time.time()
                 
                 if "KICK" in msg:
-                    play_sound("KICK")
+                    if now - last_hit_time["KICK"] > DEBOUNCE_TIME:
+                        play_sound("KICK")
+                        last_hit_time["KICK"] = now
+                        
                 elif "LEFT" in msg: 
-                    play_sound(current_zone_left)
+                    if now - last_hit_time["LEFT"] > DEBOUNCE_TIME:
+                        play_sound(current_zone_left)
+                        last_hit_time["LEFT"] = now
+                        
                 elif "RIGHT" in msg: 
-                    play_sound(current_zone_right)
-                    
-            except: break
-        
+                    if now - last_hit_time["RIGHT"] > DEBOUNCE_TIME:
+                        play_sound(current_zone_right)
+                        last_hit_time["RIGHT"] = now
+                        
+            except BlockingIOError: 
+                break 
+            except Exception as e: 
+                # I added a print here just in case something else is failing!
+                print(f" [DEBUG] UDP Error: {e}") 
+                break
+                
         time.sleep(0.001)
 
 if __name__ == "__main__":
