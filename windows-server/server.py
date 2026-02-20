@@ -24,8 +24,12 @@ DIVIDER_2 = 0.65  # Center vs Right for Top & Bottom (65%)
 # Stick Physics
 STICK_EXTENSION = 1.2 
 
-# --- NEW: PERFORMANCE & TRACKING ---
+# --- PERFORMANCE & TRACKING ---
 HEADLESS_MODE = False  # Set to True to disable video rendering for max FPS
+
+# --- DEBOUNCE SETTINGS ---
+DEBOUNCE_TIME = 0.04  # 40 milliseconds cooldown per stick
+last_hit_time = {"LEFT": 0.0, "RIGHT": 0.0, "KICK": 0.0}
 
 # Lightweight Kalman Filter (Alpha-Beta)
 KALMAN_ALPHA = 0.6     # Trust in raw position
@@ -376,7 +380,7 @@ def h(data):
 
 def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
 
-# ================= UDP NETWORK (UPDATED FOR KICK) =================
+# ================= UDP NETWORK (UPDATED WITH DEBOUNCE) =================
 def udp_loops():
     t_disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     t_disc.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -384,30 +388,49 @@ def udp_loops():
     t_list.bind(("0.0.0.0", UDP_HIT_PORT))
     t_list.setblocking(False) 
     print(f" [NET] Listening on {UDP_HIT_PORT}")
+    
     last_broadcast = 0
+    
     while True:
         current_time = time.time()
-        # 1. Discovery Broadcast
+        
+        # 1. Discovery Broadcast (CRITICAL: Hardware needs this to connect!)
         if current_time - last_broadcast > 1.0:
-            try: t_disc.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
-            except: pass
+            try: 
+                t_disc.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
+            except: 
+                pass
             last_broadcast = current_time
         
-        # 2. Receive Hits
+        # 2. Receive Hits & Debounce
         while True:
             try:
                 data, _ = t_list.recvfrom(32)
                 msg = data.decode("utf-8").upper().strip()
+                now = time.time()
                 
                 if "KICK" in msg:
-                    play_sound("KICK")
+                    if now - last_hit_time["KICK"] > DEBOUNCE_TIME:
+                        play_sound("KICK")
+                        last_hit_time["KICK"] = now
+                        
                 elif "LEFT" in msg: 
-                    play_sound(current_zone_left)
+                    if now - last_hit_time["LEFT"] > DEBOUNCE_TIME:
+                        play_sound(current_zone_left)
+                        last_hit_time["LEFT"] = now
+                        
                 elif "RIGHT" in msg: 
-                    play_sound(current_zone_right)
-                    
-            except BlockingIOError: break 
-            except Exception as e: break
+                    if now - last_hit_time["RIGHT"] > DEBOUNCE_TIME:
+                        play_sound(current_zone_right)
+                        last_hit_time["RIGHT"] = now
+                        
+            except BlockingIOError: 
+                break 
+            except Exception as e: 
+                # I added a print here just in case something else is failing!
+                print(f" [DEBUG] UDP Error: {e}") 
+                break
+                
         time.sleep(0.001)
 
 # ================= MAIN =================
@@ -465,5 +488,6 @@ if __name__ == "__main__":
                 
         vs.stop()
         if not HEADLESS_MODE: cv2.destroyAllWindows()
+
 
 
