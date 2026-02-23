@@ -7,6 +7,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import logging
+import sys
 from flask import Flask, render_template_string, jsonify
 from flask_socketio import SocketIO
 
@@ -44,8 +45,15 @@ latest_frame_from_phone = None
 frame_lock = threading.Lock()
 
 # ================= AUDIO ENGINE =================
-pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=64)
+pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=64)
+pygame.mixer.init()
+pygame.init()
 pygame.mixer.set_num_channels(16)
+
+volumes = {
+    "SNARE": 1.0, "HI-HAT": 1.0, "FLOOR TOM": 1.0, 
+    "CRASH": 1.0, "RIDE": 1.0, "KICK": 1.0
+}
 
 def load_sound(path):
     if os.path.exists(path): return pygame.mixer.Sound(path)
@@ -57,7 +65,7 @@ sounds = {
     "HI-HAT": load_sound("sounds/hihat.wav"),
     "FLOOR TOM": load_sound("sounds/tom.wav"),
     "CRASH": load_sound("sounds/crash.wav"),
-    "RIDE": load_sound("sounds/ride.wav"), # <--- NEW RIDE SOUND
+    "RIDE": load_sound("sounds/ride.wav"), 
     "KICK": load_sound("sounds/kick.wav")  
 }
 
@@ -69,6 +77,7 @@ def play_sound(zone):
 # ================= THREADED CAMERA CLASS =================
 class WebcamStream:
     def __init__(self, src=0, width=320, height=240):
+        # Standard VideoCapture for Windows
         self.stream = cv2.VideoCapture(src)
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
@@ -124,7 +133,7 @@ def process_pose_frame(frame, mirror_mode=False):
     results = pose.process(rgb_frame)
 
     if not HEADLESS_MODE:
-        # Draw Zones (Updated Layout)
+        # Draw Zones
         c = (100, 100, 100)
         cymbal_y = int(h * CYMBAL_HEIGHT)
         div_1_x = int(w * DIVIDER_1)
@@ -196,7 +205,7 @@ def process_pose_frame(frame, mirror_mode=False):
 
 # ================= PWA SERVER =================
 app = Flask(__name__)
-# IMPORTANT: ping_interval set lower to keep connection snappy
+# Keep threading for Windows environment stability
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', ping_interval=5)
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -206,96 +215,51 @@ HTML_PAGE = """
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Air Drums (Binary Mode)</title>
-    <link rel="manifest" href="/manifest.json">
+    <title>Air Drums</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#000000">
     <style>
         * { box-sizing: border-box; }
         body { 
-            margin: 0; 
-            background-color: #000; 
-            display: flex; 
-            flex-direction: column;
-            justify-content: center; 
-            align-items: center; 
-            height: 100vh; 
-            width: 100vw; 
-            overflow: hidden; 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            color: white; 
-            user-select: none;
-            -webkit-font-smoothing: antialiased;
+            margin: 0; background-color: #000; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; height: 100vh; width: 100vw; 
+            overflow: hidden; font-family: sans-serif; color: white; user-select: none;
         }
-        #ui-layer {
-            text-align: center;
-            z-index: 10;
-        }
+        #ui-layer { text-align: center; z-index: 10; }
         #start-btn {
-            padding: 18px 40px; 
-            font-size: 1.1rem; 
-            font-weight: 600;
-            color: #fff; 
-            background: #ff8000;
-            border: none; 
-            border-radius: 50px; 
-            cursor: pointer; 
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            box-shadow: 0 4px 15px rgba(255, 128, 0, 0.4);
-            transition: transform 0.2s, box-shadow 0.2s;
+            padding: 18px 40px; font-size: 1.1rem; font-weight: 600; color: #fff; 
+            background: #ff8000; border: none; border-radius: 50px; cursor: pointer; 
+            text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(255, 128, 0, 0.4);
         }
-        #start-btn:active {
-            transform: scale(0.95);
-        }
-        #status { 
-            display: none; 
-            animation: fadeIn 0.5s ease-out;
-        }
+        #start-btn:active { transform: scale(0.95); }
+        #status { display: none; animation: fadeIn 0.5s ease-out; }
         h3 { margin: 10px 0 5px 0; letter-spacing: 2px; }
         p { margin: 0; font-size: 0.9rem; opacity: 0.7; }
-
         .pulsing-circle {
-            width: 60px; 
-            height: 60px; 
-            background-color: #ff751a; 
-            border-radius: 50%;
-            margin: 0 auto 20px auto; 
-            position: relative;
+            width: 60px; height: 60px; background-color: #ff751a; border-radius: 50%;
+            margin: 0 auto 20px auto; position: relative;
         }
         .pulsing-circle::before, .pulsing-circle::after {
-            content: '';
-            position: absolute;
-            left: 0; top: 0; right: 0; bottom: 0;
-            border-radius: 50%;
-            border: 2px solid #ff751a;
-            animation: pulse 2s infinite;
+            content: ''; position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+            border-radius: 50%; border: 2px solid #ff751a; animation: pulse 2s infinite;
         }
         .pulsing-circle::after { animation-delay: 0.5s; }
-
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 1; }
-            100% { transform: scale(2.5); opacity: 0; }
-        }
+        @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(2.5); opacity: 0; } }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 </head>
 <body>
-    
     <div id="ui-layer">
         <button id="start-btn" onclick="start()">Start Stream</button>
-        
         <div id="status">
             <div class="pulsing-circle"></div>
             <h3>LIVE</h3>
             <p>Camera Stream Active</p>
         </div>
     </div>
-
     <video id="v" autoplay playsinline muted style="display:none"></video>
     <canvas id="c" style="display:none"></canvas>
-
     <script>
         const s = io(); 
         const v = document.getElementById('v'); 
@@ -306,39 +270,21 @@ HTML_PAGE = """
         
         async function start(){
             try {
-                // Request Camera
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        facingMode: "environment", 
-                        width: { ideal: 640 }, 
-                        height: { ideal: 360 },
-                        frameRate: { ideal: 30 }
-                    }
+                    video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 30 } }
                 });
-                
                 v.srcObject = stream; 
                 await v.play();
-                
-                // Update UI
                 btn.style.display = 'none'; 
                 status.style.display = 'block';
-                
-                // Optimize Canvas size for transmission speed
                 c.width = 320; 
                 c.height = 180; 
 
-                // Start Transmission Loop (Target ~30 FPS)
                 setInterval(() => {
                     ctx.drawImage(v, 0, 0, 320, 180);
-                    
-                    // Send as Binary Blob (Lower CPU usage than Base64)
-                    c.toBlob(blob => {
-                        if(blob) s.emit('frame', blob);
-                    }, 'image/jpeg', 0.5); 
-                    
+                    c.toBlob(blob => { if(blob) s.emit('frame', blob); }, 'image/jpeg', 0.5); 
                 }, 33); 
 
-                // Fullscreen (Mobile experience)
                 if (document.documentElement.requestFullscreen) {
                     document.documentElement.requestFullscreen().catch(e => {});
                 }
@@ -356,31 +302,23 @@ HTML_PAGE = """
 @app.route('/') 
 def index(): return render_template_string(HTML_PAGE)
 
-@app.route('/manifest.json') 
-def m(): 
-    return jsonify({
-        "name": "AirDrums", "short_name": "Drums", "display": "standalone",
-        "orientation": "landscape", "background_color": "#000000", "theme_color": "#000000",
-        "start_url": "/", "icons": [{"src": "https://cdn-icons-png.flaticon.com/512/2907/2907253.png", "sizes": "192x192", "type": "image/png"}]
-    })
-
 @socketio.on('frame')
 def h(data):
-    # CONCEPT 4: Receive Binary Data directly
     global latest_frame_from_phone
     try:
-        # No Base64 decode needed. 'data' is already bytes.
         n = np.frombuffer(data, np.uint8)
         frame = cv2.imdecode(n, cv2.IMREAD_COLOR)
-        
         with frame_lock: 
             latest_frame_from_phone = frame
     except Exception as e: 
         print(f"Frame Error: {e}")
 
-def run_web(): socketio.run(app, host="0.0.0.0", port=WEB_PORT)
+def run_web(): 
+    # allow_unsafe_werkzeug ensures compatibility when using threading mode
+    socketio.run(app, host="0.0.0.0", port=WEB_PORT, allow_unsafe_werkzeug=True)
 
-# ================= UDP NETWORK (UPDATED WITH DEBOUNCE) =================
+
+# ================= UDP NETWORK (WITH DEBOUNCE) =================
 def udp_loops():
     t_disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     t_disc.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -394,15 +332,11 @@ def udp_loops():
     while True:
         current_time = time.time()
         
-        # 1. Discovery Broadcast (CRITICAL: Hardware needs this to connect!)
         if current_time - last_broadcast > 1.0:
-            try: 
-                t_disc.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
-            except: 
-                pass
+            try: t_disc.sendto(b"AIRDRUM_SERVER", ("255.255.255.255", UDP_DISCOVERY_PORT))
+            except: pass
             last_broadcast = current_time
         
-        # 2. Receive Hits & Debounce
         while True:
             try:
                 data, _ = t_list.recvfrom(32)
@@ -424,70 +358,191 @@ def udp_loops():
                         play_sound(current_zone_right)
                         last_hit_time["RIGHT"] = now
                         
-            except BlockingIOError: 
-                break 
+            except BlockingIOError: break 
             except Exception as e: 
-                # I added a print here just in case something else is failing!
                 print(f" [DEBUG] UDP Error: {e}") 
                 break
                 
         time.sleep(0.001)
 
-# ================= MAIN =================
-if __name__ == "__main__":
+# ================= PYGAME UI & MAIN LOOP =================
+def main():
+    global HEADLESS_MODE, volumes, sounds
+
+    # Get local IP for display
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try: s.connect(("8.8.8.8",80)); ip=s.getsockname()[0]; s.close()
     except: ip="127.0.0.1"
 
-    print("="*30)
-    print(" AIR DRUMS: BINARY MODE + KICK")
-    print("="*30)
-    
+    # Start network thread
     threading.Thread(target=udp_loops, daemon=True).start()
 
-    mode = input(" Mode (1=Laptop, 2=Phone): ").strip()
-    print(f" [INFO] Headless Mode is {'ON (Max FPS)' if HEADLESS_MODE else 'OFF'}")
+    # Pygame UI Setup
+    screen = pygame.display.set_mode((700, 450))
+    pygame.display.set_caption("Air Drums Control Panel (Windows)")
+    font = pygame.font.SysFont("arial", 20, bold=True)
+    title_font = pygame.font.SysFont("arial", 28, bold=True)
+    small_font = pygame.font.SysFont("arial", 14)
 
-    if mode == "2":
-        print(f" Go to: http://{ip}:{WEB_PORT}")
-        threading.Thread(target=run_web, daemon=True).start()
-        
-        last_processed_id = None 
+    # UI State
+    app_state = "STARTUP" 
+    camera_mode = None
+    vs = None
+    lid = None
 
-        while True:
-            with frame_lock:
-                if latest_frame_from_phone is not None:
-                    current_id = id(latest_frame_from_phone)
+    # UI Elements Layout
+    btn_pc = pygame.Rect(150, 180, 180, 60)
+    btn_mobile = pygame.Rect(370, 180, 180, 60)
+    btn_ip = pygame.Rect(20, 380, 110, 40)
+    btn_headless = pygame.Rect(275, 380, 150, 40)
+    
+    show_ip = False
+    
+    drum_names = ["SNARE", "HI-HAT", "CRASH", "RIDE", "FLOOR TOM", "KICK"]
+    sliders = {}
+    spacing = 700 / 6
+    for i, name in enumerate(drum_names):
+        x_center = (i * spacing) + (spacing / 2)
+        sliders[name] = pygame.Rect(x_center - 15, 120, 30, 200)
+
+    dragging_slider = None
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        screen.fill((15, 15, 20)) 
+
+        # --- EVENT HANDLING ---
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1: 
+                    if app_state == "STARTUP":
+                        if btn_pc.collidepoint(event.pos):
+                            camera_mode = "PC"
+                            vs = WebcamStream(src=0).start()
+                            app_state = "MIXER"
+                        elif btn_mobile.collidepoint(event.pos):
+                            camera_mode = "MOBILE"
+                            threading.Thread(target=run_web, daemon=True).start()
+                            app_state = "MIXER"
+                        elif btn_ip.collidepoint(event.pos):
+                            show_ip = not show_ip
                     
-                    if current_id != last_processed_id:
-                        frame = cv2.flip(latest_frame_from_phone, 1)
-                        processed_frame = process_pose_frame(frame, mirror_mode=True)
-                        if not HEADLESS_MODE:
-                            cv2.imshow('Phone Feed', processed_frame)
-                        last_processed_id = current_id
+                    elif app_state == "MIXER":
+                        if btn_headless.collidepoint(event.pos):
+                            HEADLESS_MODE = not HEADLESS_MODE
+                            if HEADLESS_MODE: 
+                                cv2.destroyAllWindows()
+                        elif camera_mode == "MOBILE" and btn_ip.collidepoint(event.pos):
+                            show_ip = not show_ip
+                        
+                        for name, rect in sliders.items():
+                            if rect.collidepoint(event.pos):
+                                dragging_slider = name
             
-            if not HEADLESS_MODE:
-                if cv2.waitKey(1) & 0xFF == ord('q'): break
-            else:
-                time.sleep(0.001)
-    else:
-        vs = WebcamStream(src=0).start()
-        print(" [CAM] Threaded Capture Started")
-        while not vs.stopped:
-            frame = vs.read()
-            if frame is None: continue
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    dragging_slider = None
             
-            frame = cv2.flip(frame, 1)
-            frame = process_pose_frame(frame, mirror_mode=True)
+            elif event.type == pygame.MOUSEMOTION:
+                if dragging_slider:
+                    rect = sliders[dragging_slider]
+                    rel_y = max(0, min(rect.height, event.pos[1] - rect.y))
+                    new_vol = 1.0 - (rel_y / rect.height)
+                    volumes[dragging_slider] = new_vol
+                    if sounds.get(dragging_slider):
+                        sounds[dragging_slider].set_volume(new_vol)
+
+        # --- DRAWING UI ---
+        if app_state == "STARTUP":
+            title = title_font.render("AIR DRUMS", True, (255, 128, 0)) 
+            screen.blit(title, (270, 80))
+
+            pygame.draw.rect(screen, (50, 150, 255), btn_pc, border_radius=10)
+            pygame.draw.rect(screen, (255, 120, 50), btn_mobile, border_radius=10)
+
+            screen.blit(font.render("PC Camera", True, (255, 255, 255)), (btn_pc.x + 35, btn_pc.y + 18))
+            screen.blit(font.render("Mobile App", True, (255, 255, 255)), (btn_mobile.x + 35, btn_mobile.y + 18))
             
-            if not HEADLESS_MODE:
-                cv2.imshow('Laptop Feed', frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'): break
-            else:
-                time.sleep(0.001)
+            # Show/Hide IP Toggle Button
+            pygame.draw.rect(screen, (70, 70, 90), btn_ip, border_radius=5)
+            ip_btn_txt = font.render("Hide IP" if show_ip else "Show IP", True, (255, 255, 255))
+            screen.blit(ip_btn_txt, (btn_ip.x + 10, btn_ip.y + 8))
+            
+            if show_ip:
+                ip_txt = small_font.render(f"Phone URL: http://{ip}:{WEB_PORT}", True, (50, 255, 100))
+                screen.blit(ip_txt, (btn_ip.x, btn_ip.y - 20))
+
+        elif app_state == "MIXER":
+            # Draw Sliders
+            for name, rect in sliders.items():
+                pygame.draw.rect(screen, (40, 40, 50), rect) 
                 
-        vs.stop()
-        if not HEADLESS_MODE: cv2.destroyAllWindows()
+                vol = volumes[name]
+                fill_h = int(vol * rect.height)
+                fill_y = rect.y + (rect.height - fill_h)
+                
+                r = 255
+                g = int(vol * 200)
+                b = max(0, int(138 - (vol * 138)))
+                pygame.draw.rect(screen, (r, g, b), (rect.x, fill_y, rect.width, fill_h)) 
+                pygame.draw.rect(screen, (220, 220, 220), (rect.x-5, fill_y-5, rect.width+10, 10)) 
+                
+                lbl = small_font.render(name, True, (200, 200, 200))
+                screen.blit(lbl, (rect.x + 15 - (lbl.get_width()//2), rect.y - 25))
+                val_lbl = small_font.render(f"{int(vol*100)}%", True, (255, 255, 255))
+                screen.blit(val_lbl, (rect.x + 15 - (val_lbl.get_width()//2), rect.y + rect.height + 10))
 
+            # Draw Headless Toggle
+            h_color = (255, 128, 0) if HEADLESS_MODE else (100, 100, 100)
+            pygame.draw.rect(screen, h_color, btn_headless, border_radius=5)
+            h_text = font.render(f"Headless: {'ON' if HEADLESS_MODE else 'OFF'}", True, (255, 255, 255))
+            screen.blit(h_text, (btn_headless.x + 15, btn_headless.y + 8))
+            
+            # IP Toggle Button (Visible only in Mobile Mode)
+            if camera_mode == "MOBILE":
+                pygame.draw.rect(screen, (70, 70, 90), btn_ip, border_radius=5)
+                ip_btn_txt = font.render("Hide IP" if show_ip else "Show IP", True, (255, 255, 255))
+                screen.blit(ip_btn_txt, (btn_ip.x + 10, btn_ip.y + 8))
+                
+                if show_ip:
+                    ip_txt = small_font.render(f"Phone URL: http://{ip}:{WEB_PORT}", True, (50, 255, 100))
+                    screen.blit(ip_txt, (btn_ip.x, btn_ip.y - 20))
+            
+            mode_txt = small_font.render(f"[{camera_mode} MODE]", True, (150, 150, 150))
+            screen.blit(mode_txt, (580, 20))
 
+            # --- CAMERA PROCESSING ---
+            if camera_mode == "PC":
+                f = vs.read()
+                if f is not None:
+                    frame = process_pose_frame(cv2.flip(f, 1), True)
+                    if not HEADLESS_MODE:
+                        cv2.imshow('Air Drums - PC Feed', frame)
+                        cv2.waitKey(1)
+            
+            elif camera_mode == "MOBILE":
+                with frame_lock:
+                    if latest_frame_from_phone is not None:
+                        cid = id(latest_frame_from_phone)
+                        if cid != lid:
+                            frame = process_pose_frame(cv2.flip(latest_frame_from_phone, 1), True)
+                            lid = cid
+                            if not HEADLESS_MODE:
+                                cv2.imshow('Air Drums - Mobile Feed', frame)
+                                cv2.waitKey(1)
 
+        pygame.display.flip()
+        clock.tick(60)
+
+    # Cleanup
+    if vs: vs.stop()
+    cv2.destroyAllWindows()
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
