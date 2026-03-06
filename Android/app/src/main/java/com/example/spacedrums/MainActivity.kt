@@ -3,22 +3,27 @@ package com.example.spacedrums
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CaptureRequest
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -33,7 +38,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -41,96 +45,6 @@ import java.net.InetAddress
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-// --- LOGIC ENGINE ---
-class DrumLogic {
-    // MATCHING PYTHON ZONES EXACTLY
-    private val CYMBAL_HEIGHT = 0.35f
-    private val DIVIDER_1 = 0.35f
-    private val DIVIDER_2 = 0.65f
-
-    private val STICK_EXTENSION = 1.5f
-
-    // --- KALMAN FILTER (PYTHON MATCH) ---
-    // Slightly higher alpha (0.7 vs 0.6) makes it stickier to the hand
-    private val KALMAN_ALPHA = 0.7f
-    private val KALMAN_BETA = 0.2f
-
-    // CRITICAL FIX: Python uses 4 frames at 60fps (~66ms).
-    // Android runs slower (~30fps). We must LOWER this to 2.0
-    // to prevent the "overshoot" ghost hits.
-    private val PREDICTION_FACTOR = 2.0f
-
-    var currentZoneLeft = "SNARE"
-    var currentZoneRight = "SNARE"
-
-    // State: [x, y, vx, vy]
-    private var kLeft = FloatArray(4)
-    private var kRight = FloatArray(4)
-    private var initLeft = false
-    private var initRight = false
-
-    fun update(lElbow: NormalizedLandmark, lWrist: NormalizedLandmark, rElbow: NormalizedLandmark, rWrist: NormalizedLandmark): Pair<FloatArray, FloatArray> {
-        val (rawLx, rawLy) = extendLine(lElbow.x(), lElbow.y(), lWrist.x(), lWrist.y())
-        val (rawRx, rawRy) = extendLine(rElbow.x(), rElbow.y(), rWrist.x(), rWrist.y())
-
-        val leftTip = runKalman(rawLx, rawLy, true)
-        val rightTip = runKalman(rawRx, rawRy, false)
-
-        currentZoneLeft = getZone(leftTip[0], leftTip[1])
-        currentZoneRight = getZone(rightTip[0], rightTip[1])
-        return Pair(leftTip, rightTip)
-    }
-
-    private fun extendLine(x1: Float, y1: Float, x2: Float, y2: Float): Pair<Float, Float> {
-        val x = x2 + (x2 - x1) * STICK_EXTENSION
-        val y = y2 + (y2 - y1) * STICK_EXTENSION
-        return Pair(x, y)
-    }
-
-    private fun runKalman(rawX: Float, rawY: Float, isLeft: Boolean): FloatArray {
-        val k = if (isLeft) kLeft else kRight
-
-        if (!(if (isLeft) initLeft else initRight)) {
-            k[0] = rawX; k[1] = rawY; k[2] = 0f; k[3] = 0f
-            if (isLeft) initLeft = true else initRight = true
-            return floatArrayOf(rawX, rawY)
-        }
-
-        // 1. Prediction
-        val predX = k[0] + k[2]
-        val predY = k[1] + k[3]
-
-        // 2. Residual
-        val resX = rawX - predX
-        val resY = rawY - predY
-
-        // 3. Update (Alpha-Beta Filter)
-        k[0] = predX + (KALMAN_ALPHA * resX) // Position
-        k[1] = predY + (KALMAN_ALPHA * resY)
-        k[2] = k[2] + (KALMAN_BETA * resX)   // Velocity
-        k[3] = k[3] + (KALMAN_BETA * resY)
-
-        // 4. Projection (The "Lag Fix")
-        // We project slightly into the future to reduce visual lag,
-        // but clamped to prevent the "floor tom ghost hit".
-        val finalX = k[0] + (k[2] * PREDICTION_FACTOR)
-        val finalY = k[1] + (k[3] * PREDICTION_FACTOR)
-
-        return floatArrayOf(finalX.coerceIn(0f, 1f), finalY.coerceIn(0f, 1f))
-    }
-
-    private fun getZone(x: Float, y: Float): String {
-        if (y < CYMBAL_HEIGHT) {
-            return if (x < DIVIDER_2) "CRASH" else "RIDE"
-        } else {
-            if (x < DIVIDER_1) return "HI-HAT"
-            if (x < DIVIDER_2) return "SNARE"
-            return "FLOOR TOM"
-        }
-    }
-}
-
-// --- MAIN ACTIVITY ---
 class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListener {
 
     private lateinit var cameraExecutor: ExecutorService
@@ -145,8 +59,10 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
         "KICK" to 1f, "CRASH" to 1f, "RIDE" to 1f
     )
 
-    // Debounce
-    private val DEBOUNCE_TIME = 40L
+    private var showLowLightWarning by mutableStateOf(false)
+
+    // INCREASED DEBOUNCE to 120ms to prevent physical stick double-hits
+    private val DEBOUNCE_TIME = 100L
     private var lastHitTime = mutableMapOf("LEFT" to 0L, "RIGHT" to 0L, "KICK" to 0L)
 
     private val UDP_HIT_PORT = 5556
@@ -158,6 +74,12 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
     private var rightStickPos by mutableStateOf(Offset.Zero)
     private var leftZoneName by mutableStateOf("WAITING")
     private var rightZoneName by mutableStateOf("WAITING")
+
+    // UI Drawing State for dynamic lines
+    private var uiCymbalY by mutableStateOf(0.35f)
+    private var uiLeftDiv by mutableStateOf(0.35f)
+    private var uiRightDiv by mutableStateOf(0.65f)
+    private var uiChestCenter by mutableStateOf(0.5f)
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -224,7 +146,8 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
             var lastBroadcast = 0L
 
             while (isRunning) {
-                val now = System.currentTimeMillis()
+                // Ground truth timestamp for hardware sync
+                val now = SystemClock.uptimeMillis()
 
                 if (now - lastBroadcast > 1000) {
                     broadcastAggressive(broadcastSocket, "AIRDRUM_SERVER")
@@ -235,7 +158,9 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
                     try {
                         socket.receive(packet)
                         val msg = String(packet.data, 0, packet.length).trim().uppercase()
-                        val hitNow = System.currentTimeMillis()
+
+                        // Exact time the packet was received, matching camera's clock
+                        val hitNow = SystemClock.uptimeMillis()
 
                         if (msg.contains("KICK")) {
                             val last = lastHitTime["KICK"] ?: 0L
@@ -248,7 +173,10 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
                         if (msg.contains("LEFT")) {
                             val last = lastHitTime["LEFT"] ?: 0L
                             if (hitNow - last > DEBOUNCE_TIME) {
-                                playSound(drumLogic.currentZoneLeft)
+                                // Request dynamic trajectory prediction based on latency
+                                val predictedZone = drumLogic.predictHitZone(isLeft = true, hitTimestamp = hitNow)
+                                leftZoneName = predictedZone
+                                playSound(predictedZone)
                                 lastHitTime["LEFT"] = hitNow
                             }
                         }
@@ -256,7 +184,10 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
                         if (msg.contains("RIGHT")) {
                             val last = lastHitTime["RIGHT"] ?: 0L
                             if (hitNow - last > DEBOUNCE_TIME) {
-                                playSound(drumLogic.currentZoneRight)
+                                // Request dynamic trajectory prediction based on latency
+                                val predictedZone = drumLogic.predictHitZone(isLeft = false, hitTimestamp = hitNow)
+                                rightZoneName = predictedZone
+                                playSound(predictedZone)
                                 lastHitTime["RIGHT"] = hitNow
                             }
                         }
@@ -293,18 +224,29 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
         } catch (e: Exception) {}
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun startCameraAnalysis() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             val provider = cameraProviderFuture.get()
-            val analyzer = ImageAnalysis.Builder()
+
+            val analyzerBuilder = ImageAnalysis.Builder()
                 .setTargetResolution(Size(640, 360))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build()
-                .also { it.setAnalyzer(cameraExecutor) { img -> poseHelper.detectLiveStream(img) } }
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+
+            // HARDWARE OVERRIDE: Request 60 FPS from the camera sensor
+            Camera2Interop.Extender(analyzerBuilder).setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 60)
+            )
+
+            val analyzer = analyzerBuilder.build().also {
+                it.setAnalyzer(cameraExecutor) { img -> poseHelper.detectLiveStream(img) }
+            }
 
             try {
                 provider.unbindAll()
+                // SWITCH TO REAR CAMERA
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analyzer)
             } catch(e: Exception) { Log.e("Cam", "Bind failed", e) }
         }, ContextCompat.getMainExecutor(this))
@@ -312,11 +254,29 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
 
     override fun onResults(result: PoseLandmarkerResult) {
         result.landmarks().firstOrNull()?.let { lm ->
-            val (lTip, rTip) = drumLogic.update(lm[14], lm[16], lm[13], lm[15])
-            leftStickPos = Offset(lTip[0], lTip[1])
-            rightStickPos = Offset(rTip[0], rTip[1])
-            leftZoneName = drumLogic.currentZoneLeft
-            rightZoneName = drumLogic.currentZoneRight
+            // Extract MediaPipe's exact frame timestamp
+            val frameTime = result.timestampMs()
+
+            // Update the flight recorder in DrumLogic
+            drumLogic.updateTracking(
+                lm[11], lm[12], // Left/Right Shoulder
+                lm[14], lm[16], // Left Elbow/Wrist
+                lm[13], lm[15], // Right Elbow/Wrist
+                frameTime
+            )
+
+            // Update the UI warning state
+            showLowLightWarning = drumLogic.isLowLight
+
+            // Read latest positions purely for UI drawing
+            leftStickPos = Offset(drumLogic.latestLeftX, drumLogic.latestLeftY)
+            rightStickPos = Offset(drumLogic.latestRightX, drumLogic.latestRightY)
+
+            // Sync UI bounds to match DrumLogic
+            uiCymbalY = drumLogic.uiCymbalHeight
+            uiLeftDiv = drumLogic.uiLeftDivider
+            uiRightDiv = drumLogic.uiRightDivider
+            uiChestCenter = drumLogic.uiChestX
         }
     }
 
@@ -326,9 +286,28 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
     fun SpaceDrumsApp() {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             DrumOverlay()
+
+            // LOW LIGHT WARNING
+            if (showLowLightWarning) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Red.copy(alpha = 0.7f))
+                        .padding(8.dp)
+                        .align(Alignment.TopCenter)
+                ) {
+                    Text(
+                        text = "⚠️ Low light detected! Turn on some lights for better tracking.",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+            }
+
             MixerUI(volumeMap, modifier = Modifier.align(Alignment.CenterEnd))
 
-            // --- BRANDING LOGO ---
             Column(
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -346,21 +325,29 @@ class MainActivity : ComponentActivity(), PoseDetectorHelper.PoseDetectorListene
     @Composable
     fun DrumOverlay() {
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width; val h = size.height
-            val cymbalY = h * 0.35f
+            val w = size.width
+            val h = size.height
 
-            // MATCHING PYTHON ZONES
-            val div1 = w * 0.35f
-            val div2 = w * 0.65f
+            // Dynamic Body-Anchored Zones mapped to screen pixels
+            val cymbalPixelY = uiCymbalY * h
+            val div1PixelX = uiLeftDiv * w
+            val div2PixelX = uiRightDiv * w
+            val chestPixelX = uiChestCenter * w
 
-            drawLine(Color.Magenta, Offset(0f, cymbalY), Offset(w, cymbalY), 3f)
-            drawLine(Color.Green, Offset(div1, cymbalY), Offset(div1, h), 3f)
-            drawLine(Color.Green, Offset(div2, 0f), Offset(div2, h), 3f)
+            // Crash/Ride Splitter (above cymbal line)
+            drawLine(Color.Yellow, Offset(chestPixelX, 0f), Offset(chestPixelX, cymbalPixelY), 3f)
+            // Cymbal Horizon
+            drawLine(Color.Magenta, Offset(0f, cymbalPixelY), Offset(w, cymbalPixelY), 3f)
+            // Hi-Hat / Snare / Tom Vertical Dividers
+            drawLine(Color.Green, Offset(div1PixelX, cymbalPixelY), Offset(div1PixelX, h), 3f)
+            drawLine(Color.Green, Offset(div2PixelX, cymbalPixelY), Offset(div2PixelX, h), 3f)
 
+            // Stick Tips
             drawCircle(Color.Cyan, 30f, Offset(leftStickPos.x * w, leftStickPos.y * h))
             drawCircle(Color.Red, 30f, Offset(rightStickPos.x * w, rightStickPos.y * h))
         }
         Column(modifier = Modifier.padding(16.dp)) {
+            // Zone names now show what drum was hit LAST, effectively verifying the prediction engine
             Text("L: $leftZoneName", color = Color.Cyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text("R: $rightZoneName", color = Color.Red, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         }
