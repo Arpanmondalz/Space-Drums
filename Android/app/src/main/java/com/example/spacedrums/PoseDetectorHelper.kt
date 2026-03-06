@@ -25,7 +25,8 @@ class PoseDetectorHelper(
 
     private fun setupPoseLandmarker() {
         val baseOptions = BaseOptions.builder()
-            .setModelAssetPath("pose_landmarker_lite.task")
+            // UPGRADED to full model for better crossed-arm tracking
+            .setModelAssetPath("pose_landmarker_full.task")
             .setDelegate(Delegate.GPU)
             .build()
 
